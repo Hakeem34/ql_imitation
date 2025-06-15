@@ -11,7 +11,8 @@ import win32con
 import win32gui
 import win32ui
 
-EXE_SCRIPT = 'import subprocess'
+RE_URL         = re.compile(r'https?://.+')
+RE_ENVIRON_VAL = re.compile(r'(\%[^%]+\%)')
 
 SHGFI_ICON = 0x000000100
 SHGFI_ICONLOCATION = 0x000001000
@@ -19,7 +20,11 @@ SHGFI_USEFILEATTRIBUTES = 0x000000010
 #SHIL_SIZE = 0x00001
 SHIL_SIZE = 0x00002
 
-def get_icon(target_file):
+
+#/*****************************************************************************/
+#/* ICON画像データの取得と保存                                                */
+#/*****************************************************************************/
+def save_icon(target_file, target_icon):
     ret, info = shell.SHGetFileInfo(target_file, 0, SHGFI_ICONLOCATION | SHGFI_ICON | SHIL_SIZE | SHGFI_USEFILEATTRIBUTES)
     hIcon, iIcon, dwAttr, name, typeName = info
     ico_x = win32api.GetSystemMetrics(win32con.SM_CXICON)
@@ -39,8 +44,9 @@ def get_icon(target_file):
         (bmpinfo["bmWidth"], bmpinfo["bmHeight"]),
         bmpstr, "raw", "BGRA", 0, 1
     )
-    return img
 
+    img.save(target_icon, format="ICO", sizes=[(32, 32)])
+    return img
 
 
 #/*****************************************************************************/
@@ -53,9 +59,10 @@ def get_ftype_exe(file_type):
 
     if (result := re.match(fr'{file_type}=(\")*(.+\.exe)(\")*', returncode.stdout)):
         assoc_prog = result.group(2)
-        print(f'{file_type} の関連アプリケーションは {assoc_prog}です')
+#       print(f'{file_type} の関連アプリケーションは {assoc_prog}です')
     else:
-        print(f'{file_type} の関連アプリケーションが見つかりませんでした')
+#       print(f'{file_type} の関連アプリケーションが見つかりませんでした')
+        pass
 
     return assoc_prog
 
@@ -71,12 +78,66 @@ def get_assoc_exe(ext):
 
     if (result := re.match(f'{ext}=(.+)', returncode.stdout)):
         file_type = result.group(1)
-        print(f'{ext}に紐づくのは、{file_type}')
-        get_ftype_exe(file_type)
+#       print(f'{ext}に紐づくのは、{file_type}')
+        assoc_prog = get_ftype_exe(file_type)
     else:
         print(f'{returncode.stdout}')
 
     return assoc_prog
+
+
+
+#/*****************************************************************************/
+#/* 実行ファイルの元になるpyファイルの作成                                    */
+#/*****************************************************************************/
+def make_script(target_script, start_target):
+    py_file = open(target_script, "w", encoding='utf-8')
+    print(f'import subprocess', file=py_file)
+
+    cmd_text = f"cmd = r'start \"\" \"{start_target}\"'"            #/* start と起動したいファイルの間に、""を入れておかないと、半角スペースを含むパスのファイルを開けない */
+    print(cmd_text, file=py_file)
+    print('returncode = subprocess.Popen(cmd, shell=True)', file=py_file)
+    py_file.close()
+
+
+#/*****************************************************************************/
+#/* 実行ファイルの作成                                                        */
+#/*****************************************************************************/
+def make_executable(target_file, exe_file):
+    target_name = os.path.splitext(os.path.basename(target_file))[0]
+
+    ql_path = '.\\ql_' + target_name
+    os.makedirs(os.path.join(ql_path), exist_ok = True)
+    os.chdir(ql_path)
+
+    target_script = target_name + '.py'
+    target_icon   = target_name + '.ico'
+
+    make_script(target_script, target_file)
+    img = save_icon(exe_file, target_icon)
+
+    cmd_text = f'pyinstaller "{target_script}" --onefile --noconsole --clean --icon="{target_icon}"'
+    returncode = subprocess.run(cmd_text, shell=True, capture_output=True, text=True)
+#   print(returncode)
+    os.chdir('..')
+    print('EXE生成が完了しました。')
+
+    #/* 生成したEXEファイルの絶対パスを返す */
+    return Path(ql_path + '\\dist').resolve()
+
+
+
+#/*****************************************************************************/
+#/* 環境変数の置き換え                                                        */
+#/*****************************************************************************/
+def convert_environment_values(value):
+    ret_value = value
+    while (result := RE_ENVIRON_VAL.search(ret_value)):
+        env_val      = result.group(1)
+        env_val_name = env_val[1:-1]
+        ret_value = ret_value.replace(env_val, os.environ[env_val_name])
+
+    return ret_value
 
 
 #/*****************************************************************************/
@@ -92,6 +153,7 @@ def main():
         return
 
 #   print(sys.platform)
+    open_path   = ''
     target_file = sys.argv.pop(0)
     target_abs_path = Path(target_file).resolve()
     target_name = os.path.splitext(os.path.basename(target_file))[0]
@@ -99,33 +161,33 @@ def main():
     if (target_ext):
         prog_path = get_assoc_exe(target_ext)
 
-    if (os.path.isfile(target_file) or os.path.isdir(target_file)):
-        if (str(target_abs_path) == __file__):
-            print(f'自分自身を指定することはできません')
-            return
+    if (os.path.isfile(target_file)):
+        print(f'ファイル {target_file} を開くEXEを作成します')
+        open_path = make_executable(target_abs_path, target_file)                  #/* 通常ファイルは絶対パスにして、ファイルそのものをexeファイルに指定する                        */
+    elif  (os.path.isdir(target_file)):
+        print(f'フォルダ {target_file} を開くEXEを作成します')
+        sys_root = os.environ['SystemRoot']
 
-        print(f'{target_name} を起動するEXEを作成します')
-        target_script = target_name + '.py'
-        target_icon   = target_name + '.ico'
-        py_file = open(target_script, "w", encoding='utf-8')
-        print(f'import subprocess', file=py_file)
-
-        cmd_text = f"cmd = r'start \"\" \"{target_abs_path}\"'"            #/* start と起動したいファイルの間に、""を入れておかないと、半角スペースを含むパスのファイルを開けない */
-        print(cmd_text, file=py_file)
-        print('returncode = subprocess.Popen(cmd, shell=True)', file=py_file)
-        py_file.close()
-
-        img = get_icon(target_file)
-        img.save(target_icon, format="ICO", sizes=[(32, 32)])
-
-        cmd_text = f'pyinstaller "{target_script}" --onefile --noconsole --clean --icon="{target_icon}"'
-        returncode = subprocess.run(cmd_text, shell=True, capture_output=True, text=True)
-        print(returncode)
-        print('EXE生成が完了しました。')
-
+        explorer = get_ftype_exe('folder')
+        explorer = convert_environment_values(explorer)
+        open_path = make_executable(target_abs_path, target_file)                  #/* フォルダは絶対パスにして、エクスプローラのexeを指定する                                      */
+    elif  (result := RE_URL.match(target_file)):
+        print(f'URL {target_file} を開くEXEを作成します')
+        chrome = get_ftype_exe('ChromeHTML')
+        edge   = get_ftype_exe('html')
+        if (chrome != ''):
+            open_path = make_executable(target_file, chrome)                       #/* URLはそのまま渡して、ChromeかEdgeのexeを指定する(デフォルトブラウザを調べるのはめんどくさい) */
+        else:
+            open_path = make_executable(target_file, edge)
     else:
         print(f'{target_file} は有効なファイルではありません')
 
+
+    #/* 最後にできあがったexeファイルのあるパスを開く（タスクバーへの登録は手動でやってもらう） */
+    if (open_path != ''):
+        cmd_text = f'start \"\" \"{open_path}\"'
+        returncode = subprocess.run(cmd_text, shell=True, capture_output=True, text=True)
+        
     return
 
 
